@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from html import escape
 import io
 import os
 import sqlite3
@@ -10,7 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -157,6 +159,78 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         with closing(connection()) as db:
             rows = db.execute(f"SELECT * FROM applications{where} ORDER BY id", values).fetchall()
             return [dict(row) for row in rows]
+
+    def get_stats() -> dict[str, Any]:
+        with closing(connection()) as db:
+            total = db.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
+            status_rows = db.execute(
+                "SELECT status, COUNT(*) AS count FROM applications GROUP BY status ORDER BY status"
+            ).fetchall()
+            company_rows = db.execute(
+                "SELECT company, COUNT(*) AS count FROM applications GROUP BY company "
+                "ORDER BY count DESC, company COLLATE NOCASE ASC LIMIT 10"
+            ).fetchall()
+            oldest = db.execute(
+                "SELECT id, company, role, applied_at FROM applications "
+                "WHERE status IN ('applied', 'screening') AND applied_at IS NOT NULL "
+                "ORDER BY applied_at ASC, id ASC LIMIT 1"
+            ).fetchone()
+
+        oldest_unanswered = None
+        if oldest is not None:
+            applied_date = date.fromisoformat(oldest["applied_at"])
+            oldest_unanswered = {
+                "id": oldest["id"],
+                "company": oldest["company"],
+                "role": oldest["role"],
+                "applied_at": oldest["applied_at"],
+                "days_waiting": (date.today() - applied_date).days,
+            }
+
+        return {
+            "total": total,
+            "by_status": {row["status"]: row["count"] for row in status_rows},
+            "by_company": [{"company": row["company"], "count": row["count"]} for row in company_rows],
+            "oldest_unanswered": oldest_unanswered,
+        }
+
+    @app.get("/stats")
+    async def stats() -> dict[str, Any]:
+        return get_stats()
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    async def dashboard() -> str:
+        summary = get_stats()
+        status_rows = "".join(
+            f"<tr><td>{escape(status)}</td><td>{count}</td></tr>"
+            for status, count in summary["by_status"].items()
+        ) or '<tr><td colspan="2">No applications yet</td></tr>'
+        company_rows = "".join(
+            f"<tr><td>{escape(item['company'])}</td><td>{item['count']}</td></tr>"
+            for item in summary["by_company"]
+        ) or '<tr><td colspan="2">No applications yet</td></tr>'
+        oldest = summary["oldest_unanswered"]
+        oldest_card = (
+            f"<p><strong>{escape(oldest['company'])}</strong> — {escape(oldest['role'])}</p>"
+            f"<p>Applied {escape(oldest['applied_at'])}; waiting {oldest['days_waiting']} days.</p>"
+            if oldest else "<p>No unanswered applications.</p>"
+        )
+        empty_message = '<p class="empty">No applications yet</p>' if summary["total"] == 0 else ""
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Application Dashboard</title>
+<style>
+body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #202938; background: #f5f7fb; }}
+h1, h2 {{ color: #172554; }} .total, .card {{ background: white; border-radius: 10px; padding: 1rem 1.25rem; box-shadow: 0 2px 10px #17255414; }}
+.card {{ border-left: 5px solid #2563eb; margin: 1rem 0 2rem; }} .tables {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.5rem; }}
+table {{ width: 100%; border-collapse: collapse; background: white; }} th, td {{ text-align: left; padding: .65rem; border-bottom: 1px solid #e5e7eb; }}
+.empty {{ color: #526078; }}
+</style></head><body>
+<h1>Job Application Dashboard</h1><p class="total">Total applications: <strong>{summary['total']}</strong></p>{empty_message}
+<section class="card"><h2>Oldest unanswered application</h2>{oldest_card}</section>
+<div class="tables"><section><h2>Applications by status</h2><table><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>{status_rows}</tbody></table></section>
+<section><h2>Applications by company</h2><table><thead><tr><th>Company</th><th>Count</th></tr></thead><tbody>{company_rows}</tbody></table></section></div>
+</body></html>"""
 
     @app.get("/applications/export.csv")
     async def export_applications(

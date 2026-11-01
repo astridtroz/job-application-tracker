@@ -128,3 +128,60 @@ def test_health(client):
     assert response.json() == {"status": "ok"}
 
 
+def test_stats_empty_database(client):
+    response = client.get("/stats")
+    assert response.status_code == 200
+    assert response.json() == {
+        "total": 0,
+        "by_status": {},
+        "by_company": [],
+        "oldest_unanswered": None,
+    }
+
+
+def test_stats_counts_and_oldest_unanswered(client):
+    create(client, company="Acme", status="applied", applied_at="2025-01-02")
+    create(client, company="Acme", status="screening", applied_at="2025-02-03")
+    create(client, company="Beta", status="offer", applied_at="2024-01-01")
+    body = client.get("/stats").json()
+    assert body["total"] == 3
+    assert body["by_status"] == {"applied": 1, "offer": 1, "screening": 1}
+    assert body["by_company"] == [{"company": "Acme", "count": 2}, {"company": "Beta", "count": 1}]
+    assert body["oldest_unanswered"]["company"] == "Acme"
+    assert body["oldest_unanswered"]["role"] == "Engineer"
+    assert body["oldest_unanswered"]["applied_at"] == "2025-01-02"
+    assert body["oldest_unanswered"]["id"] == 1
+    assert isinstance(body["oldest_unanswered"]["days_waiting"], int)
+
+
+def test_stats_oldest_unanswered_ignores_other_statuses_and_null_dates(client):
+    create(client, company="Not Applied", status="saved", applied_at="2020-01-01")
+    create(client, company="No Date", status="applied")
+    create(client, company="Newer", status="screening", applied_at="2024-02-01")
+    create(client, company="Oldest", status="applied", applied_at="2024-01-01")
+    oldest = client.get("/stats").json()["oldest_unanswered"]
+    assert oldest["id"] == 4
+    assert oldest["company"] == "Oldest"
+
+
+def test_dashboard_contains_seeded_counts(client):
+    create(client, company="Acme", status="applied", applied_at="2025-01-02")
+    create(client, company="Acme", status="offer")
+    create(client, company="Beta", status="screening", applied_at="2025-02-03")
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Job Application Dashboard" in response.text
+    assert "Total applications: <strong>3</strong>" in response.text
+    assert "applied</td><td>1" in response.text
+    assert "Acme</td><td>2" in response.text
+    assert "Oldest unanswered application" in response.text
+    assert "Acme" in response.text
+
+
+def test_dashboard_empty_state(client):
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "No applications yet" in response.text
+
+
