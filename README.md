@@ -1,6 +1,6 @@
 # Job Application Tracker
 
-A small API for recording job applications and following their progress. It tracks her real job hunt, with filters and CSV export for reviewing applications.
+A small API for recording job applications and following their progress. It supports status, company, and date filters, plus CSV export for reviewing progress.
 
 ## Quickstart
 
